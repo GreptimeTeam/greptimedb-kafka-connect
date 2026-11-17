@@ -9,7 +9,7 @@ The plugin targets Java 8 and is tested with Kafka Connect 3.9 and GreptimeDB v1
 
 ## Install
 
-1. Download `greptimedb-kafka-connect-<version>.zip` from [Releases](https://github.com/GreptimeTeam/greptimedb-kafka-connect/releases), or build it from source with `mvn package -DskipTests`, which writes it to `target/`.
+1. Download `greptimedb-kafka-connect-<version>.zip` from [Releases](https://github.com/GreptimeTeam/greptimedb-kafka-connect/releases), or build it from source with `mvn package -DskipTests`, which writes it to `target/`. Each release also includes a SHA-512 checksum file; verify the download with `sha512sum -c greptimedb-kafka-connect-<version>.zip.sha512`.
 2. Extract the archive into a directory listed in the worker's `plugin.path`:
 
    ```shell
