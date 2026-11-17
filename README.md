@@ -1,58 +1,60 @@
 # GreptimeDB Kafka Connect
 
-A Kafka Connect sink connector that writes records from Kafka topics to GreptimeDB tables over gRPC.
+[![CI](https://github.com/GreptimeTeam/greptimedb-kafka-connect/actions/workflows/ci.yml/badge.svg)](https://github.com/GreptimeTeam/greptimedb-kafka-connect/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-- Maps top-level record fields to the time index, tag columns, and field columns.
-- Accepts `Struct` values (Avro, Protobuf, JSON Schema, or JSON with `schemas.enable=true`) and schemaless `Map` values (JSON with `schemas.enable=false`).
-- Creates tables and adds columns through GreptimeDB's automatic schema creation.
-- Writes in batches and retries transient write errors.
+A Kafka Connect sink connector that writes Kafka records to GreptimeDB over gRPC. You choose which record fields become the time index, tags, and fields. GreptimeDB creates tables and columns automatically.
 
-## Requirements
+The plugin targets Java 8 and is tested with Kafka Connect 3.9 and GreptimeDB v1.3.
 
-- Kafka Connect 2.6 or later. The plugin is compiled for Java 8 and tested with Kafka Connect 3.9.
-- GreptimeDB with the gRPC endpoint (default port 4001) reachable from the Connect workers.
+## Install
 
-## Installation
+1. Build the plugin archive:
 
-Build the plugin archive:
+   ```shell
+   mvn package -DskipTests
+   ```
+
+2. Extract `target/greptimedb-kafka-connect-<version>.zip` into a directory listed in the worker's `plugin.path`:
+
+   ```shell
+   unzip target/greptimedb-kafka-connect-<version>.zip -d /opt/connectors
+   ```
+
+3. Restart the Connect worker.
+
+## Quick start
+
+Create a connector that writes JSON records from topic `sensor` to table `kafka_sensor`:
 
 ```shell
-mvn package -DskipTests
+curl -X PUT -H 'Content-Type: application/json' http://localhost:8083/connectors/greptimedb-sink/config -d '{
+  "connector.class": "io.greptime.kafka.connect.GreptimeDBSinkConnector",
+  "topics": "sensor",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter.schemas.enable": "false",
+  "greptimedb.endpoints": "greptimedb:4001",
+  "table.name.format": "kafka_${topic}",
+  "timestamp.field": "ts",
+  "tag.fields": "device",
+  "errors.tolerance": "all",
+  "errors.deadletterqueue.topic.name": "sensor-dlq",
+  "errors.deadletterqueue.topic.replication.factor": "1"
+}'
 ```
 
-The build produces `target/greptimedb-kafka-connect-<version>.zip`. Extract it into a directory listed in the worker's `plugin.path`, then restart the worker.
+Produce a record:
 
 ```shell
-unzip target/greptimedb-kafka-connect-<version>.zip -d /opt/connectors
+echo '{"ts": 1700000000000, "device": "d1", "temperature": 21.5}' |
+  kafka-console-producer.sh --bootstrap-server localhost:9092 --topic sensor
 ```
 
-## Example
+The record becomes a row with time index `ts`, tag `device`, and field `temperature`:
 
-```json
-{
-  "name": "greptimedb-sink",
-  "config": {
-    "connector.class": "io.greptime.kafka.connect.GreptimeDBSinkConnector",
-    "topics": "sensor",
-    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-    "value.converter.schemas.enable": "false",
-    "greptimedb.endpoints": "greptimedb:4001",
-    "greptimedb.database": "public",
-    "table.name.format": "kafka_${topic}",
-    "timestamp.field": "ts",
-    "tag.fields": "device",
-    "field.exclude": "debug"
-  }
-}
+```shell
+curl http://localhost:4000/v1/sql --data-urlencode 'sql=SELECT * FROM kafka_sensor'
 ```
-
-With this configuration, the record
-
-```json
-{"ts": 1700000000000, "device": "d1", "temperature": 21.5, "debug": "x"}
-```
-
-on topic `sensor` is written to table `kafka_sensor` with time index `ts`, tag `device`, and field `temperature`.
 
 ## Configuration
 
@@ -62,22 +64,22 @@ on topic `sensor` is written to table `kafka_sensor` with time index `ts`, tag `
 |---|---|---|
 | `greptimedb.endpoints` | (required) | Comma-separated gRPC endpoints, `host:port`. |
 | `greptimedb.database` | `public` | Target database. |
-| `greptimedb.username` | empty | Username. Authentication is disabled when empty. |
-| `greptimedb.password` | empty | Password. |
+| `greptimedb.username` | Empty | Username. When empty, the connector doesn't authenticate. |
+| `greptimedb.password` | Empty | Password. |
 | `greptimedb.tls.enabled` | `false` | Connect over TLS. |
-| `greptimedb.tls.ca.cert.path` | empty | PEM file with the CA certificates used to verify the server. The JVM default trust store is used when empty. |
+| `greptimedb.tls.ca.cert.path` | Empty | PEM file with the CA certificates that verify the server. When empty, the connector uses the JVM default trust store. |
 
 ### Mapping
 
 | Name | Default | Description |
 |---|---|---|
 | `table.name.format` | `${topic}` | Target table. `${topic}` is replaced with the record topic. |
-| `timestamp.field` | empty | Top-level field used as the time index. When empty, the Kafka record timestamp is written to a column named `greptime_timestamp`. |
-| `timestamp.precision` | `ms` | Precision of the time index column: `s`, `ms`, `us`, or `ns`. Integer timestamp values are interpreted in this unit. |
-| `tag.fields` | empty | Top-level fields written as tag columns. |
-| `field.include` | empty | Top-level fields written as field columns. When empty, all fields other than the timestamp and tag fields are written. |
-| `field.exclude` | empty | Top-level fields that are not written. |
-| `behavior.on.null.values` | `fail` | Records with a null value (tombstones): `fail` treats them as bad records, `ignore` skips them. |
+| `timestamp.field` | Empty | Top-level field to use as the time index. When empty, the connector writes the Kafka record timestamp to a column named `greptime_timestamp`. |
+| `timestamp.precision` | `ms` | Precision of the time index column: `s`, `ms`, `us`, or `ns`. The connector reads integer timestamp values in this unit. |
+| `tag.fields` | Empty | Top-level fields to write as tag columns. |
+| `field.include` | Empty | Top-level fields to write as field columns. When empty, the connector writes all fields other than the timestamp and tag fields. |
+| `field.exclude` | Empty | Top-level fields to leave out. |
+| `behavior.on.null.values` | `fail` | Handling of records with a null value (tombstones). `fail` treats them as bad records. `ignore` skips them. |
 
 ### Writes and retries
 
@@ -85,13 +87,24 @@ on topic `sensor` is written to table `kafka_sensor` with time index `ts`, tag `
 |---|---|---|
 | `batch.size` | `1000` | Maximum number of rows per write request. |
 | `max.retries` | `10` | Maximum number of consecutive retries of a batch after a retryable write error. |
-| `retry.backoff.ms` | `3000` | Wait time before retrying a batch. |
+| `retry.backoff.ms` | `3000` | Time to wait, in milliseconds, before retrying a batch. |
 
-## Mapping rules
+## Notes
 
-The time index value must be an integer (epoch in `timestamp.precision` units) or a Connect `Timestamp`. Records where it is missing or null are bad records.
+- **Choose tags before the first write.** The first write creates the table, and the tags become its primary key. Changing `tag.fields` later doesn't change an existing table, and rows that conflict with it are rejected.
+- **The time index must be an integer epoch or a Connect `Timestamp`.** Integers are read in `timestamp.precision` units. String timestamps aren't supported; convert them with the `TimestampConverter` transform.
+- **Column types are fixed by the first write.** A later value of a different type is rejected. In schemaless JSON, `20` is an integer and `20.5` is a float, so write floating-point values with a decimal point, such as `20.0`.
+- **Nested values aren't supported.** Exclude `STRUCT`, `MAP`, and `ARRAY` fields with `field.exclude`, or flatten structs and maps with the `Flatten` transform.
+- **Configure a dead letter queue.** Records that can't be written, such as a record without a time index or a value of the wrong type, are bad records. With `errors.tolerance=all`, they go to the dead letter queue, or are skipped if none is set. With the default `errors.tolerance=none`, a bad record fails the task.
+- **Transient errors are retried, never skipped.** When GreptimeDB is unreachable or busy, the connector retries the batch every `retry.backoff.ms`. After `max.retries` consecutive retries, the task fails. Restart it after fixing the cause:
 
-Column types come from the Connect schema when the value has one:
+  ```shell
+  curl -X POST 'http://localhost:8083/connectors/greptimedb-sink/restart?includeTasks=true&onlyFailed=true'
+  ```
+
+- **Delivery is at-least-once.** Replayed rows overwrite rows with the same tags and time index. Tables created with `append_mode = 'true'` keep the duplicates.
+
+### Type mapping
 
 | Connect type | GreptimeDB type |
 |---|---|
@@ -105,32 +118,14 @@ Column types come from the Connect schema when the value has one:
 | `Date` | `Date` |
 | `Time` | `TimeMillisecond` |
 
-For schemaless values, the type comes from the Java value: `Long` to `Int64`, `Double` to `Float64`, `Boolean` to `Boolean`, `String` to `String`. A schemaless field with a null value is left out of the row and stored as null.
-
-Nested values (`STRUCT`, `MAP`, `ARRAY`) are not supported. Records containing them in a written field are bad records. Use `field.exclude` or a transform such as `Flatten` to drop or flatten them.
-
-Within one batch, all records for a table must agree on the type of each column. A record that disagrees with an earlier record in the batch is a bad record. With schemaless JSON, `20` and `20.5` in the same field produce `Int64` and `Float64` and conflict; write floating-point fields with a decimal point, for example `20.0`.
-
-## Delivery and error handling
-
-The connector writes each batch synchronously before Kafka Connect commits offsets, so delivery is at-least-once. Rows replayed after a retry or a task restart overwrite the existing rows with the same tags and time index. Tables created with `append_mode = 'true'` keep the duplicates.
-
-Write errors are classified by the retry hint GreptimeDB returns (v1.2 and later), then by the GreptimeDB status code, then by the gRPC status code. On a retryable error, such as an unreachable server, a busy region, or rate limiting, the task asks Kafka Connect to redeliver the batch after `retry.backoff.ms`. After `max.retries` consecutive retries the task fails. Non-retryable errors, such as a type mismatch with an existing column or an authentication failure, fail the task immediately.
-
-Bad records, which cannot be mapped to a row, are sent to the errant record reporter when `errors.tolerance=all` is set, together with `errors.deadletterqueue.topic.name` if the records should be kept. Otherwise a bad record fails the task.
 
 ## Development
 
 ```shell
-# Unit tests
-mvn test
-
-# Unit and integration tests; requires Docker
-mvn verify
+mvn verify                                 # unit and integration tests, requires Docker
+mvn package -DskipTests && e2e/run.sh      # end-to-end test with Kafka, Connect, and GreptimeDB
 ```
-
-The integration tests use `greptime/greptimedb:v1.3.1` and `apache/kafka:3.9.1`. Override them with `-Dgreptimedb.image=...` and `-Dkafka.image=...`.
 
 ## License
 
-Apache License 2.0
+[Apache License 2.0](LICENSE)

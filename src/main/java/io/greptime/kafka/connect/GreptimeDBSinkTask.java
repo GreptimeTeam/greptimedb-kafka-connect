@@ -26,8 +26,10 @@ import io.greptime.options.GreptimeOptions;
 import io.greptime.rpc.TlsOptions;
 import java.io.File;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.DataException;
@@ -39,20 +41,24 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Writes each {@link #put} batch synchronously, so offsets committed by the framework only cover written
- * records (at-least-once). A retryable write failure throws {@link RetriableException}, which makes the
- * framework redeliver the same batch after {@code retry.backoff.ms}. Rows written before the failure are
- * written again; tables with the default (non-append) mode deduplicate them by primary key and time index.
+ * Writes each {@link #put} batch synchronously, so committed offsets only cover written records. A
+ * retryable failure throws {@link RetriableException} and the framework redelivers the same batch.
  */
 public class GreptimeDBSinkTask extends SinkTask {
 
     private static final Logger LOG = LoggerFactory.getLogger(GreptimeDBSinkTask.class);
 
+    // Connect framework setting; the task sees it because task configs are the connector config.
+    private static final String ERRORS_TOLERANCE = "errors.tolerance";
+
     private GreptimeDBSinkConfig config;
     private RecordConverter converter;
     private GreptimeDB client;
     private ErrantRecordReporter reporter;
+    private boolean tolerateBadRecords;
     private int remainingRetries;
+    // Bad records already handled in the batch being retried, so redeliveries do not report them again.
+    private final Set<String> handledBadRecords = new HashSet<>();
 
     @Override
     public String version() {
@@ -64,6 +70,7 @@ public class GreptimeDBSinkTask extends SinkTask {
         this.config = new GreptimeDBSinkConfig(props);
         this.converter = new RecordConverter(this.config);
         this.reporter = errantRecordReporter();
+        this.tolerateBadRecords = "all".equalsIgnoreCase(props.get(ERRORS_TOLERANCE));
         this.remainingRetries = this.config.maxRetries();
         this.client = GreptimeDB.create(clientOptions(this.config));
         LOG.info(
@@ -117,32 +124,61 @@ public class GreptimeDBSinkTask extends SinkTask {
                             "Record value is null and " + GreptimeDBSinkConfig.BEHAVIOR_ON_NULL_VALUES + " is fail");
                 }
                 RecordConverter.Row row = this.converter.convert(record);
-                batches.computeIfAbsent(row.table, TableBatch::new).add(row);
+                batches.computeIfAbsent(row.table, TableBatch::new).add(row, record);
             } catch (DataException e) {
-                reportBadRecord(record, e);
+                handleBadRecord(record, e);
             }
         }
 
+        int batchSize = this.config.batchSize();
         for (TableBatch batch : batches.values()) {
-            for (Table table : batch.toTables(this.config.batchSize())) {
-                write(table);
+            for (int from = 0; from < batch.size(); from += batchSize) {
+                writeRange(batch, from, Math.min(from + batchSize, batch.size()));
             }
         }
         this.remainingRetries = this.config.maxRetries();
+        this.handledBadRecords.clear();
     }
 
-    private void reportBadRecord(SinkRecord record, DataException e) {
+    private void handleBadRecord(SinkRecord record, DataException e) {
         String where = String.format(
                 "topic=%s, partition=%d, offset=%d", record.topic(), record.kafkaPartition(), record.kafkaOffset());
+        if (!this.tolerateBadRecords) {
+            throw new DataException("Bad record (" + where + "): " + e.getMessage(), e);
+        }
+        if (!this.handledBadRecords.add(where)) {
+            return;
+        }
         if (this.reporter == null) {
-            throw new DataException("Failed to convert record (" + where + "): " + e.getMessage(), e);
+            LOG.warn("Skipping bad record ({}): {}", where, e.getMessage());
+            return;
         }
         LOG.warn("Reporting bad record ({}): {}", where, e.getMessage());
-        // Throws when errors.tolerance=none, failing the task.
         this.reporter.report(record, e);
     }
 
-    private void write(Table table) {
+    /** Writes rows {@code [from, to)} of the batch. */
+    private void writeRange(TableBatch batch, int from, int to) {
+        Table table = batch.toTable(from, to);
+        WriteFailure failure = write(table);
+        if (failure == null) {
+            return;
+        }
+        if (failure.kind == WriteErrors.Kind.DATA && this.tolerateBadRecords) {
+            if (to - from == 1) {
+                handleBadRecord(batch.record(from), new DataException(failure.message, failure.cause));
+                return;
+            }
+            int mid = (from + to) >>> 1;
+            writeRange(batch, from, mid);
+            writeRange(batch, mid, to);
+            return;
+        }
+        throw toException(failure);
+    }
+
+    /** Returns null when the write succeeded. */
+    private WriteFailure write(Table table) {
         Result<WriteOk, Err> result;
         try {
             result = this.client.write(table).get();
@@ -151,32 +187,45 @@ public class GreptimeDBSinkTask extends SinkTask {
             throw new ConnectException("Interrupted while writing to table " + table.tableName(), e);
         } catch (ExecutionException e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
-            throw writeFailure(table, WriteErrors.isRetryable(cause), String.valueOf(cause), cause);
+            return new WriteFailure(table, WriteErrors.classify(cause), String.valueOf(cause), cause);
         }
-        if (!result.isOk()) {
-            Err err = result.getErr();
-            throw writeFailure(table, WriteErrors.isRetryableStatusCode(err.getCode()), err.toString(), err.getError());
+        if (result.isOk()) {
+            return null;
         }
+        Err err = result.getErr();
+        return new WriteFailure(table, WriteErrors.classifyStatusCode(err.getCode()), err.toString(), err.getError());
     }
 
-    private ConnectException writeFailure(Table table, boolean retryable, String detail, Throwable cause) {
-        String message =
-                String.format("Failed to write %d rows to table %s: %s", table.rowCount(), table.tableName(), detail);
-        if (!retryable) {
-            return new ConnectException(message + " (not retryable)", cause);
+    private ConnectException toException(WriteFailure failure) {
+        if (failure.kind != WriteErrors.Kind.RETRYABLE) {
+            return new ConnectException(failure.message + " (not retryable)", failure.cause);
         }
         if (this.remainingRetries <= 0) {
             return new ConnectException(
-                    message + " (retries exhausted after " + this.config.maxRetries() + " attempts)", cause);
+                    failure.message + " (retries exhausted after " + this.config.maxRetries() + " attempts)",
+                    failure.cause);
         }
         this.remainingRetries--;
         LOG.warn(
                 "{}; retrying the batch in {} ms, {} retries left",
-                message,
+                failure.message,
                 this.config.retryBackoffMs(),
                 this.remainingRetries);
         this.context.timeout(this.config.retryBackoffMs());
-        return new RetriableException(message, cause);
+        return new RetriableException(failure.message, failure.cause);
+    }
+
+    private static final class WriteFailure {
+        final WriteErrors.Kind kind;
+        final String message;
+        final Throwable cause;
+
+        WriteFailure(Table table, WriteErrors.Kind kind, String detail, Throwable cause) {
+            this.kind = kind;
+            this.message = String.format(
+                    "Failed to write %d rows to table %s: %s", table.rowCount(), table.tableName(), detail);
+            this.cause = cause;
+        }
     }
 
     @Override

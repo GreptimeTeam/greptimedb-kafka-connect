@@ -18,7 +18,6 @@ package io.greptime.kafka.connect;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.net.ServerSocket;
@@ -162,17 +161,19 @@ class GreptimeDBSinkTaskIT {
         assertTrue(e.getMessage().contains("retries exhausted"), e.getMessage());
     }
 
+    private static StubContext collectingContext(List<SinkRecord> reported) {
+        return new StubContext((record, error) -> {
+            assertTrue(error instanceof DataException, error.toString());
+            reported.add(record);
+            return CompletableFuture.completedFuture(null);
+        });
+    }
+
     @Test
     void badRecordsGoToErrantReporterAndGoodOnesAreWritten() throws Exception {
         List<SinkRecord> reported = new ArrayList<>();
         GreptimeDBSinkTask task = startTask(
-                new StubContext((record, error) -> {
-                    assertTrue(error instanceof DataException, error.toString());
-                    reported.add(record);
-                    return CompletableFuture.completedFuture(null);
-                }),
-                GreptimeDBSinkConfig.TIMESTAMP_FIELD,
-                "ts");
+                collectingContext(reported), GreptimeDBSinkConfig.TIMESTAMP_FIELD, "ts", "errors.tolerance", "all");
 
         SinkRecord good = record("dlq", null, map("ts", 1L, "v", 1L), 0);
         SinkRecord missingTs = record("dlq", null, map("v", 2L), 1);
@@ -180,19 +181,77 @@ class GreptimeDBSinkTaskIT {
         SinkRecord tombstone = record("dlq", null, null, 3);
         task.put(Arrays.asList(good, missingTs, typeConflict, tombstone));
 
-        assertEquals(3, reported.size());
-        assertSame(missingTs, reported.get(0));
-        assertSame(typeConflict, reported.get(1));
-        assertSame(tombstone, reported.get(2));
+        assertEquals(Arrays.asList(missingTs, typeConflict, tombstone), reported);
         assertEquals(Collections.singletonList(Collections.singletonList("1")), GREPTIMEDB.query("SELECT v FROM dlq"));
     }
 
     @Test
-    void badRecordFailsTaskWithoutErrantReporter() {
-        GreptimeDBSinkTask task = startTask(new StubContext(null), GreptimeDBSinkConfig.TIMESTAMP_FIELD, "ts");
+    void rowsRejectedByServerAreIsolatedAndReported() throws Exception {
+        List<SinkRecord> reported = new ArrayList<>();
+        GreptimeDBSinkTask task = startTask(
+                collectingContext(reported), GreptimeDBSinkConfig.TIMESTAMP_FIELD, "ts", "errors.tolerance", "all");
+        task.put(Collections.singletonList(record("isolate", null, map("ts", 0L, "v", 0L), 0)));
+
+        // Consistent within the batch, but v is Int64 in the table, so the server rejects the request.
+        List<SinkRecord> batch = Arrays.asList(
+                record("isolate", null, map("ts", 1L, "a", 1L), 1),
+                record("isolate", null, map("ts", 2L, "v", "x"), 2),
+                record("isolate", null, map("ts", 3L, "a", 3L), 3),
+                record("isolate", null, map("ts", 4L, "v", "y"), 4),
+                record("isolate", null, map("ts", 5L, "a", 5L), 5));
+        task.put(batch);
+
+        assertEquals(Arrays.asList(batch.get(1), batch.get(3)), reported);
+        assertEquals(
+                Arrays.asList(
+                        Arrays.asList("0", null),
+                        Arrays.asList(null, "1"),
+                        Arrays.asList(null, "3"),
+                        Arrays.asList(null, "5")),
+                GREPTIMEDB.query("SELECT v, a FROM isolate ORDER BY ts"));
+    }
+
+    @Test
+    void badRecordIsReportedOnceAcrossRetries() throws Exception {
+        int closedPort;
+        try (ServerSocket s = new ServerSocket(0)) {
+            closedPort = s.getLocalPort();
+        }
+        List<SinkRecord> reported = new ArrayList<>();
+        GreptimeDBSinkTask task = startTask(
+                collectingContext(reported),
+                GreptimeDBSinkConfig.ENDPOINTS,
+                "127.0.0.1:" + closedPort,
+                GreptimeDBSinkConfig.TIMESTAMP_FIELD,
+                "ts",
+                GreptimeDBSinkConfig.RETRY_BACKOFF_MS,
+                "10",
+                "errors.tolerance",
+                "all");
+        SinkRecord bad = record("retry_dlq", null, map("v", 1L), 0);
+        List<SinkRecord> records = Arrays.asList(bad, record("retry_dlq", null, map("ts", 1L, "v", 1L), 1));
+
+        assertThrows(RetriableException.class, () -> task.put(records));
+        assertThrows(RetriableException.class, () -> task.put(records));
+        assertEquals(Collections.singletonList(bad), reported);
+    }
+
+    @Test
+    void badRecordIsSkippedWithToleranceAllAndNoReporter() throws Exception {
+        GreptimeDBSinkTask task =
+                startTask(new StubContext(null), GreptimeDBSinkConfig.TIMESTAMP_FIELD, "ts", "errors.tolerance", "all");
+        task.put(Arrays.asList(record("skip", null, map("v", 1L), 0), record("skip", null, map("ts", 2L, "v", 2L), 1)));
+        assertEquals(Collections.singletonList(Collections.singletonList("2")), GREPTIMEDB.query("SELECT v FROM skip"));
+    }
+
+    @Test
+    void badRecordFailsTaskWithoutTolerance() {
+        List<SinkRecord> reported = new ArrayList<>();
+        GreptimeDBSinkTask task = startTask(collectingContext(reported), GreptimeDBSinkConfig.TIMESTAMP_FIELD, "ts");
         assertThrows(
                 DataException.class,
                 () -> task.put(Collections.singletonList(record("no_dlq", null, map("v", 1L), 0))));
+        assertTrue(reported.isEmpty());
     }
 
     private static Map<String, Object> map(Object... kv) {

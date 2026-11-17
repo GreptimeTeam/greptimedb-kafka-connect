@@ -22,7 +22,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.greptime.models.DataType;
 import io.greptime.models.SemanticType;
-import io.greptime.models.Table;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.time.Instant;
@@ -32,7 +31,6 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.connect.data.Decimal;
@@ -125,9 +123,8 @@ class RecordConverterTest {
 
         // The ingester converts values while adding rows, so this catches values of the wrong Java type.
         TableBatch batch = new TableBatch(row.table);
-        batch.add(row);
-        List<Table> tables = batch.toTables(10);
-        assertEquals(1, tables.get(0).rowCount());
+        batch.add(row, null);
+        assertEquals(1, batch.toTable(0, 1).rowCount());
     }
 
     @Test

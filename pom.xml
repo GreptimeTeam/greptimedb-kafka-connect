@@ -31,7 +31,6 @@
 
         <!-- Image used by the integration tests; override with -Dgreptimedb.image=... -->
         <greptimedb.image>greptime/greptimedb:v1.3.1</greptimedb.image>
-        <kafka.image>apache/kafka:3.9.1</kafka.image>
 
         <palantir-java-format.version>2.41.0</palantir-java-format.version>
         <spotless-plugin.version>2.43.0</spotless-plugin.version>
@@ -73,12 +72,6 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>${testcontainers.version}</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.testcontainers</groupId>
-            <artifactId>kafka</artifactId>
             <version>${testcontainers.version}</version>
             <scope>test</scope>
         </dependency>
@@ -127,8 +120,6 @@
                 <configuration>
                     <systemPropertyVariables>
                         <greptimedb.image>${greptimedb.image}</greptimedb.image>
-                        <kafka.image>${kafka.image}</kafka.image>
-                        <plugin.zip>${project.build.directory}/${project.build.finalName}.zip</plugin.zip>
                     </systemPropertyVariables>
                 </configuration>
                 <executions>

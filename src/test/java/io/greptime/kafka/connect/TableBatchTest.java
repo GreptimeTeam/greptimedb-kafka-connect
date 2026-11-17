@@ -22,6 +22,8 @@ import io.greptime.models.DataType;
 import io.greptime.models.SemanticType;
 import io.greptime.models.Table;
 import io.greptime.v1.RowData;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import org.apache.kafka.connect.errors.DataException;
 import org.junit.jupiter.api.Test;
@@ -29,6 +31,8 @@ import org.junit.jupiter.api.Test;
 class TableBatchTest {
 
     private static final ColumnSpec TS = new ColumnSpec("ts", SemanticType.Timestamp, DataType.TimestampMillisecond);
+    private static final ColumnSpec A = new ColumnSpec("a", SemanticType.Field, DataType.Int64);
+    private static final ColumnSpec B = new ColumnSpec("b", SemanticType.Field, DataType.String);
 
     private static RecordConverter.Row row(long ts, ColumnSpec column, Object value) {
         RecordConverter.Row row = new RecordConverter.Row("t");
@@ -37,41 +41,46 @@ class TableBatchTest {
         return row;
     }
 
+    private static List<String> columnNames(Table table) {
+        List<String> names = new ArrayList<>();
+        for (RowData.ColumnSchema c : table.intoRowInsertRequest().getRows().getSchemaList()) {
+            names.add(c.getColumnName());
+        }
+        return names;
+    }
+
     @Test
-    void unionsColumnsAndSplitsIntoChunks() {
-        ColumnSpec a = new ColumnSpec("a", SemanticType.Field, DataType.Int64);
-        ColumnSpec b = new ColumnSpec("b", SemanticType.Field, DataType.String);
+    void rangeSchemaHasOnlyColumnsOfItsRows() {
         TableBatch batch = new TableBatch("t");
-        batch.add(row(1, a, 1L));
-        batch.add(row(2, b, "x"));
-        batch.add(row(3, a, 3L));
+        batch.add(row(1, A, 1L), null);
+        batch.add(row(2, B, "x"), null);
+        batch.add(row(3, A, 3L), null);
 
-        List<Table> tables = batch.toTables(2);
-        assertEquals(2, tables.size());
-        assertEquals(2, tables.get(0).rowCount());
-        assertEquals(1, tables.get(1).rowCount());
-
-        RowData.Rows first = tables.get(0).intoRowInsertRequest().getRows();
-        assertEquals(3, first.getSchemaCount());
+        Table all = batch.toTable(0, 3);
+        assertEquals(Arrays.asList("ts", "a", "b"), columnNames(all));
         // Row 1 has no column b, row 2 has no column a: both are written as null.
+        RowData.Rows rows = all.intoRowInsertRequest().getRows();
         assertEquals(
                 RowData.Value.ValueDataCase.VALUEDATA_NOT_SET,
-                first.getRows(0).getValues(2).getValueDataCase());
+                rows.getRows(0).getValues(2).getValueDataCase());
         assertEquals(
                 RowData.Value.ValueDataCase.VALUEDATA_NOT_SET,
-                first.getRows(1).getValues(1).getValueDataCase());
+                rows.getRows(1).getValues(1).getValueDataCase());
+
+        // A row isolated from a rejected request must not carry columns that only other rows have.
+        assertEquals(Arrays.asList("ts", "a"), columnNames(batch.toTable(2, 3)));
+        assertEquals(Arrays.asList("ts", "b"), columnNames(batch.toTable(1, 2)));
     }
 
     @Test
     void conflictingColumnTypeRejectsOnlyThatRow() {
         TableBatch batch = new TableBatch("t");
-        batch.add(row(1, new ColumnSpec("v", SemanticType.Field, DataType.Int64), 1L));
+        batch.add(row(1, A, 1L), null);
         assertThrows(
                 DataException.class,
-                () -> batch.add(row(2, new ColumnSpec("v", SemanticType.Field, DataType.Float64), 1.5)));
+                () -> batch.add(row(2, new ColumnSpec("a", SemanticType.Field, DataType.Float64), 1.5), null));
 
-        List<Table> tables = batch.toTables(10);
-        assertEquals(1, tables.get(0).rowCount());
-        assertEquals(2, tables.get(0).intoRowInsertRequest().getRows().getSchemaCount());
+        assertEquals(1, batch.size());
+        assertEquals(1, batch.toTable(0, 1).rowCount());
     }
 }

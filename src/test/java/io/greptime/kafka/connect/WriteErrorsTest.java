@@ -16,8 +16,9 @@
 
 package io.greptime.kafka.connect;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static io.greptime.kafka.connect.WriteErrors.classify;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import io.greptime.kafka.connect.WriteErrors.Kind;
 import io.greptime.rpc.errors.ConnectFailException;
 import io.grpc.Metadata;
 import io.grpc.Status;
@@ -39,32 +40,36 @@ class WriteErrorsTest {
     }
 
     @Test
-    void retryHintTakesPrecedence() {
-        // InvalidArguments would not be retried by code, but the server says it is retryable.
-        assertTrue(WriteErrors.isRetryable(grpcError(Status.INVALID_ARGUMENT, "1004", "retryable")));
-        assertTrue(WriteErrors.isRetryable(grpcError(Status.UNAVAILABLE, "4008", "retry_after_route_refresh")));
-        // UNAVAILABLE would be retried by gRPC code, but the server says it is not.
-        assertFalse(WriteErrors.isRetryable(grpcError(Status.UNAVAILABLE, "4008", "non_retryable")));
+    void retryHintDecidesRetryability() {
+        assertEquals(Kind.RETRYABLE, classify(grpcError(Status.INVALID_ARGUMENT, "1004", "retryable")));
+        assertEquals(Kind.RETRYABLE, classify(grpcError(Status.UNAVAILABLE, "4008", "retry_after_route_refresh")));
+        // RegionNotReady would be retried by status code, but the server says it is not retryable.
+        assertEquals(Kind.FATAL, classify(grpcError(Status.UNAVAILABLE, "4008", "non_retryable")));
+        // What GreptimeDB v1.3 returns for a value that does not match the column type.
+        assertEquals(Kind.DATA, classify(grpcError(Status.INVALID_ARGUMENT, "1004", "non_retryable")));
     }
 
     @Test
     void statusCodeIsUsedWithoutHint() {
-        assertTrue(WriteErrors.isRetryable(grpcError(Status.RESOURCE_EXHAUSTED, "4009", null))); // RegionBusy
-        assertTrue(WriteErrors.isRetryable(grpcError(Status.RESOURCE_EXHAUSTED, "6001", null))); // RateLimited
-        assertFalse(WriteErrors.isRetryable(grpcError(Status.INVALID_ARGUMENT, "1004", null))); // InvalidArguments
-        assertFalse(WriteErrors.isRetryable(grpcError(Status.UNAUTHENTICATED, "7002", null))); // UserPasswordMismatch
+        assertEquals(Kind.RETRYABLE, classify(grpcError(Status.RESOURCE_EXHAUSTED, "4009", null))); // RegionBusy
+        assertEquals(Kind.RETRYABLE, classify(grpcError(Status.RESOURCE_EXHAUSTED, "6001", null))); // RateLimited
+        assertEquals(Kind.DATA, classify(grpcError(Status.INVALID_ARGUMENT, "1004", null))); // InvalidArguments
+        // Rows are not to blame for an authentication failure, so they must not be dropped.
+        assertEquals(Kind.FATAL, classify(grpcError(Status.UNAUTHENTICATED, "7002", null)));
+        assertEquals(Kind.FATAL, classify(grpcError(Status.NOT_FOUND, "4004", null))); // DatabaseNotFound
     }
 
     @Test
     void grpcCodeIsUsedWithoutGreptimeMetadata() {
-        assertTrue(WriteErrors.isRetryable(Status.UNAVAILABLE.asRuntimeException()));
-        assertTrue(WriteErrors.isRetryable(Status.DEADLINE_EXCEEDED.asRuntimeException()));
-        assertFalse(WriteErrors.isRetryable(Status.INVALID_ARGUMENT.asRuntimeException()));
-        assertFalse(WriteErrors.isRetryable(new IllegalArgumentException("bad value")));
+        assertEquals(Kind.RETRYABLE, classify(Status.UNAVAILABLE.asRuntimeException()));
+        assertEquals(Kind.RETRYABLE, classify(Status.DEADLINE_EXCEEDED.asRuntimeException()));
+        assertEquals(Kind.DATA, classify(Status.INVALID_ARGUMENT.asRuntimeException()));
+        assertEquals(Kind.FATAL, classify(Status.PERMISSION_DENIED.asRuntimeException()));
+        assertEquals(Kind.FATAL, classify(new IllegalArgumentException("bad value")));
     }
 
     @Test
     void connectFailureIsRetryableThroughWrappers() {
-        assertTrue(WriteErrors.isRetryable(new ExecutionException(new ConnectFailException("down"))));
+        assertEquals(Kind.RETRYABLE, classify(new ExecutionException(new ConnectFailException("down"))));
     }
 }

@@ -25,12 +25,21 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 
 /**
- * Decides whether a failed write may succeed if retried.
+ * Classifies failed writes.
  *
  * <p>GreptimeDB reports write errors as gRPC errors with the status code and, since v1.2, a retry hint in
  * the trailers. The ingester does not inspect them, so its own retry never applies to server errors.
  */
 final class WriteErrors {
+
+    enum Kind {
+        /** May succeed if the same request is sent again. */
+        RETRYABLE,
+        /** The request carries rows the server rejects, e.g. a value that does not match the column type. */
+        DATA,
+        /** Neither retrying nor dropping rows helps, e.g. an authentication failure. */
+        FATAL
+    }
 
     static final Metadata.Key<String> ERR_CODE_KEY =
             Metadata.Key.of("x-greptime-err-code", Metadata.ASCII_STRING_MARSHALLER);
@@ -61,37 +70,51 @@ final class WriteErrors {
     // GreptimeDB StatusCode::DeadlineExceeded, not present in the ingester's Status enum.
     private static final int DEADLINE_EXCEEDED_CODE = 1008;
 
-    static boolean isRetryable(Throwable error) {
+    static Kind classify(Throwable error) {
         Throwable e = unwrap(error);
         if (e instanceof ConnectFailException) {
-            return true;
+            return Kind.RETRYABLE;
         }
-        io.grpc.Status grpcStatus = io.grpc.Status.fromThrowable(e);
+        io.grpc.Status.Code grpcCode = io.grpc.Status.fromThrowable(e).getCode();
         Metadata trailers = io.grpc.Status.trailersFromThrowable(e);
-        if (trailers != null) {
-            String hint = trailers.get(RETRY_HINT_KEY);
-            if (hint != null) {
-                return !HINT_NON_RETRYABLE.equals(hint);
-            }
-            String code = trailers.get(ERR_CODE_KEY);
-            if (code != null) {
-                try {
-                    return isRetryableStatusCode(Integer.parseInt(code.trim()));
-                } catch (NumberFormatException ignored) {
-                    // Fall through to the gRPC status code.
-                }
-            }
+        Integer statusCode = trailers == null ? null : parseStatusCode(trailers.get(ERR_CODE_KEY));
+        String hint = trailers == null ? null : trailers.get(RETRY_HINT_KEY);
+        if (hint != null && !HINT_NON_RETRYABLE.equals(hint)) {
+            return Kind.RETRYABLE;
         }
-        return RETRYABLE_GRPC_CODES.contains(grpcStatus.getCode());
+        if (statusCode != null) {
+            Kind kind = classifyStatusCode(statusCode);
+            // The hint overrides the status code's retryability, not its meaning.
+            return hint != null && kind == Kind.RETRYABLE ? Kind.FATAL : kind;
+        }
+        if (hint == null && RETRYABLE_GRPC_CODES.contains(grpcCode)) {
+            return Kind.RETRYABLE;
+        }
+        // Only a non-gRPC error has code UNKNOWN here, and client-side failures are not data errors.
+        return grpcCode == io.grpc.Status.Code.INVALID_ARGUMENT ? Kind.DATA : Kind.FATAL;
     }
 
-    /** For errors returned in the response header rather than as a gRPC error. */
-    static boolean isRetryableStatusCode(int code) {
+    /** For a GreptimeDB status code, also used for errors returned in the response header. */
+    static Kind classifyStatusCode(int code) {
         if (code == DEADLINE_EXCEEDED_CODE) {
-            return true;
+            return Kind.RETRYABLE;
         }
         Status status = Status.parse(code);
-        return status != null && RETRYABLE_STATUS.contains(status);
+        if (status == Status.InvalidArguments) {
+            return Kind.DATA;
+        }
+        return status != null && RETRYABLE_STATUS.contains(status) ? Kind.RETRYABLE : Kind.FATAL;
+    }
+
+    private static Integer parseStatusCode(String code) {
+        if (code == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(code.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private static Throwable unwrap(Throwable e) {

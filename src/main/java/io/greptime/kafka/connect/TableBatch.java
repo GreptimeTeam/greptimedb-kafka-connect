@@ -24,23 +24,25 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.kafka.connect.errors.DataException;
+import org.apache.kafka.connect.sink.SinkRecord;
 
 /**
- * Rows bound for one table. The batch schema is the union of the columns of its rows; a column missing
- * from a row is written as null.
+ * Rows bound for one table, each with the record it came from. All rows agree on the type of a shared
+ * column; a column missing from a row is written as null.
  */
 final class TableBatch {
 
     private final String table;
     private final LinkedHashMap<String, ColumnSpec> columns = new LinkedHashMap<>();
     private final List<Map<String, Object>> rows = new ArrayList<>();
+    private final List<SinkRecord> records = new ArrayList<>();
 
     TableBatch(String table) {
         this.table = table;
     }
 
     /** Throws {@link DataException} without modifying the batch if the row disagrees with an earlier row. */
-    void add(RecordConverter.Row row) {
+    void add(RecordConverter.Row row, SinkRecord record) {
         for (ColumnSpec column : row.columns) {
             ColumnSpec existing = this.columns.get(column.name);
             if (existing != null && !existing.equals(column)) {
@@ -56,33 +58,44 @@ final class TableBatch {
             values.put(column.name, row.values.get(i));
         }
         this.rows.add(values);
+        this.records.add(record);
     }
 
-    /** Splits the batch into tables of at most {@code maxRows} rows each. */
-    List<Table> toTables(int maxRows) {
-        TableSchema.Builder builder = TableSchema.newBuilder(this.table);
+    int size() {
+        return this.rows.size();
+    }
+
+    SinkRecord record(int index) {
+        return this.records.get(index);
+    }
+
+    /**
+     * Builds a table with rows {@code [from, to)}. The schema only has the columns present in those rows,
+     * so a single row isolated from a rejected request does not carry columns of the rows that caused it.
+     */
+    Table toTable(int from, int to) {
+        List<Map<String, Object>> range = this.rows.subList(from, to);
+        List<ColumnSpec> present = new ArrayList<>(this.columns.size());
         for (ColumnSpec c : this.columns.values()) {
+            for (Map<String, Object> row : range) {
+                if (row.containsKey(c.name)) {
+                    present.add(c);
+                    break;
+                }
+            }
+        }
+        TableSchema.Builder builder = TableSchema.newBuilder(this.table);
+        for (ColumnSpec c : present) {
             builder.addColumn(c.name, c.semanticType, c.dataType, c.decimalExtension());
         }
-        TableSchema schema = builder.build();
-
-        List<Table> tables = new ArrayList<>((this.rows.size() + maxRows - 1) / maxRows);
-        Object[] values = new Object[this.columns.size()];
-        Table current = null;
-        for (Map<String, Object> row : this.rows) {
-            if (current == null || current.rowCount() == maxRows) {
-                current = Table.from(schema);
-                tables.add(current);
+        Table table = Table.from(builder.build());
+        Object[] values = new Object[present.size()];
+        for (Map<String, Object> row : range) {
+            for (int i = 0; i < values.length; i++) {
+                values[i] = row.get(present.get(i).name);
             }
-            int i = 0;
-            for (String name : this.columns.keySet()) {
-                values[i++] = row.get(name);
-            }
-            current.addRow(values);
+            table.addRow(values);
         }
-        for (Table t : tables) {
-            t.complete();
-        }
-        return tables;
+        return table.complete();
     }
 }
