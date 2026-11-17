@@ -148,6 +148,14 @@ The Connect worker must have the Confluent Avro converter installed.
 | `Time` | `TimeMillisecond` |
 
 
+## Performance tuning
+
+Each task writes one batch at a time and waits for GreptimeDB to acknowledge it before writing the next.
+
+- **Scale with `tasks.max`.** Throughput grows with the number of tasks, up to the number of topic partitions. Create the topic with enough partitions for the parallelism you need.
+- **Keep Connect workers close to GreptimeDB.** Every batch waits for one round trip, so network latency directly limits the throughput of a task.
+- **Tune batch size last.** A batch holds at most `max.poll.records` records (500 by default). Raising it and `batch.size` gives a smaller gain than adding tasks. To raise it for this connector only, set `consumer.override.max.poll.records`. This works unless the worker restricts `connector.client.config.override.policy`, which defaults to `All`.
+
 ## Development
 
 ```shell
