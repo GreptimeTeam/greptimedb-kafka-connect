@@ -1,6 +1,7 @@
 # GreptimeDB Kafka Connect
 
 [![CI](https://github.com/GreptimeTeam/greptimedb-kafka-connect/actions/workflows/ci.yml/badge.svg)](https://github.com/GreptimeTeam/greptimedb-kafka-connect/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/GreptimeTeam/greptimedb-kafka-connect)](https://github.com/GreptimeTeam/greptimedb-kafka-connect/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 A Kafka Connect sink connector that writes Kafka records to GreptimeDB over gRPC. You choose which record fields become the time index, tags, and fields, as defined in the [GreptimeDB data model](https://docs.greptime.com/user-guide/concepts/data-model/). GreptimeDB creates tables and columns automatically.
