@@ -1,0 +1,34 @@
+{
+  "name": "greptimedb-kafka-connect",
+  "version": "${project.version}",
+  "title": "GreptimeDB Sink Connector",
+  "description": "Writes Kafka records to GreptimeDB tables over gRPC, mapping record fields to the time index, tag and field columns.",
+  "owner": {
+    "username": "greptime",
+    "type": "organization",
+    "name": "Greptime",
+    "url": "https://greptime.com"
+  },
+  "support": {
+    "summary": "Supported by the GreptimeDB community.",
+    "url": "https://github.com/GreptimeTeam/greptimedb-kafka-connect/issues",
+    "provider_name": "Greptime"
+  },
+  "tags": ["greptimedb", "time series", "observability", "metrics", "logs"],
+  "features": {
+    "supported_encodings": ["any"],
+    "single_message_transforms": true,
+    "confluent_control_center_integration": true,
+    "kafka_connect_api": true
+  },
+  "component_types": ["sink"],
+  "license": [
+    {
+      "name": "Apache License 2.0",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0"
+    }
+  ],
+  "documentation_url": "https://github.com/GreptimeTeam/greptimedb-kafka-connect",
+  "source_url": "https://github.com/GreptimeTeam/greptimedb-kafka-connect",
+  "requirements": ["GreptimeDB with the gRPC endpoint enabled"]
+}
