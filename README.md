@@ -13,7 +13,7 @@ The plugin targets Java 8 and is tested with Kafka Connect 3.9 and GreptimeDB v1
 2. Extract the archive into a directory listed in the worker's `plugin.path`:
 
    ```shell
-   unzip greptimedb-kafka-connect-<version>.zip -d /opt/connectors
+   unzip path/to/greptimedb-kafka-connect-<version>.zip -d /opt/connectors
    ```
 
 3. Restart the Connect worker.
@@ -22,11 +22,12 @@ The plugin targets Java 8 and is tested with Kafka Connect 3.9 and GreptimeDB v1
 
 This walkthrough runs Kafka, a Connect worker, and GreptimeDB locally with Docker Compose. Run the commands from a clone of this repository.
 
-1. Put the plugin where the Connect worker loads it, and start the services:
+1. Build the plugin, put it where the Connect worker loads it, and start the services:
 
    ```shell
+   mvn package -DskipTests
    mkdir -p e2e/.plugins
-   unzip greptimedb-kafka-connect-<version>.zip -d e2e/.plugins
+   unzip target/greptimedb-kafka-connect-*.zip -d e2e/.plugins
    docker compose -f e2e/docker-compose.yml up -d
    ```
 
@@ -60,6 +61,8 @@ This walkthrough runs Kafka, a Connect worker, and GreptimeDB locally with Docke
    ```shell
    curl http://localhost:14000/v1/sql --data-urlencode 'sql=SELECT * FROM kafka_sensor'
    ```
+
+   The connector writes the record asynchronously. If the query reports that the table doesn't exist or returns no rows, wait a few seconds and run it again.
 
 5. Stop the services:
 
