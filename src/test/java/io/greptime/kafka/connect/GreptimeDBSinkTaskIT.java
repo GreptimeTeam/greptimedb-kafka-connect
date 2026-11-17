@@ -181,8 +181,40 @@ class GreptimeDBSinkTaskIT {
         SinkRecord tombstone = record("dlq", null, null, 3);
         task.put(Arrays.asList(good, missingTs, typeConflict, tombstone));
 
-        assertEquals(Arrays.asList(missingTs, typeConflict, tombstone), reported);
+        // The type conflict is only found when the server rejects the row, after conversion errors.
+        assertEquals(Arrays.asList(missingTs, tombstone, typeConflict), reported);
         assertEquals(Collections.singletonList(Collections.singletonList("1")), GREPTIMEDB.query("SELECT v FROM dlq"));
+    }
+
+    @Test
+    void invalidRowFirstInBatchDoesNotTakeDownValidRows() throws Exception {
+        List<SinkRecord> reported = new ArrayList<>();
+        GreptimeDBSinkTask task = startTask(
+                collectingContext(reported), GreptimeDBSinkConfig.TIMESTAMP_FIELD, "ts", "errors.tolerance", "all");
+        task.put(Collections.singletonList(record("first_bad", null, map("ts", 0L, "v", 0L), 0)));
+
+        SinkRecord bad = record("first_bad", null, map("ts", 1L, "v", "bad"), 1);
+        SinkRecord good = record("first_bad", null, map("ts", 2L, "v", 42L), 2);
+        task.put(Arrays.asList(bad, good));
+
+        assertEquals(Collections.singletonList(bad), reported);
+        assertEquals(
+                Arrays.asList(Collections.singletonList("0"), Collections.singletonList("42")),
+                GREPTIMEDB.query("SELECT v FROM first_bad ORDER BY ts"));
+    }
+
+    @Test
+    void badRecordsWithEqualCoordinatesAreAllReported() {
+        List<SinkRecord> reported = new ArrayList<>();
+        GreptimeDBSinkTask task = startTask(
+                collectingContext(reported), GreptimeDBSinkConfig.TIMESTAMP_FIELD, "ts", "errors.tolerance", "all");
+        // Records from two source topics that an SMT routed to one topic keep their own partition and offset,
+        // so they can share topic, partition, and offset.
+        SinkRecord first = record("merged", null, map("v", 1L), 7);
+        SinkRecord second = record("merged", null, map("v", 2L), 7);
+        task.put(Arrays.asList(first, second));
+
+        assertEquals(Arrays.asList(first, second), reported);
     }
 
     @Test

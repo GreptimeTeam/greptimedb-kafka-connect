@@ -23,12 +23,11 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.sink.SinkRecord;
 
 /**
- * Rows bound for one table, each with the record it came from. All rows agree on the type of a shared
- * column; a column missing from a row is written as null.
+ * Consecutive rows bound for one table, each with the record it came from. All rows agree on the type of
+ * a shared column; a column missing from a row is written as null.
  */
 final class TableBatch {
 
@@ -41,16 +40,19 @@ final class TableBatch {
         this.table = table;
     }
 
-    /** Throws {@link DataException} without modifying the batch if the row disagrees with an earlier row. */
-    void add(RecordConverter.Row row, SinkRecord record) {
+    /** Whether the row agrees with the rows already in the batch on the type of every shared column. */
+    boolean accepts(RecordConverter.Row row) {
         for (ColumnSpec column : row.columns) {
             ColumnSpec existing = this.columns.get(column.name);
             if (existing != null && !existing.equals(column)) {
-                throw new DataException(String.format(
-                        "Column '%s' of table '%s' is %s in this record but %s in an earlier record of the batch",
-                        column.name, this.table, column, existing));
+                return false;
             }
         }
+        return true;
+    }
+
+    /** The caller must check {@link #accepts} first. */
+    void add(RecordConverter.Row row, SinkRecord record) {
         Map<String, Object> values = new HashMap<>(row.columns.size() * 2);
         for (int i = 0; i < row.columns.size(); i++) {
             ColumnSpec column = row.columns.get(i);

@@ -25,9 +25,12 @@ import io.greptime.models.WriteOk;
 import io.greptime.options.GreptimeOptions;
 import io.greptime.rpc.TlsOptions;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashSet;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -58,7 +61,9 @@ public class GreptimeDBSinkTask extends SinkTask {
     private boolean tolerateBadRecords;
     private int remainingRetries;
     // Bad records already handled in the batch being retried, so redeliveries do not report them again.
-    private final Set<String> handledBadRecords = new HashSet<>();
+    // Keyed by identity: the framework redelivers the same SinkRecord instances, while coordinates can
+    // collide after an SMT merges topics.
+    private final Set<SinkRecord> handledBadRecords = Collections.newSetFromMap(new IdentityHashMap<>());
 
     @Override
     public String version() {
@@ -112,7 +117,9 @@ public class GreptimeDBSinkTask extends SinkTask {
             return;
         }
 
-        Map<String, TableBatch> batches = new LinkedHashMap<>();
+        // A row whose column types disagree with the current batch of its table starts a new batch, so the
+        // server, not the first record of the batch, decides which rows are invalid.
+        Map<String, List<TableBatch>> batches = new LinkedHashMap<>();
         for (SinkRecord record : records) {
             if (record.value() == null
                     && this.config.nullValueBehavior() == GreptimeDBSinkConfig.NullValueBehavior.IGNORE) {
@@ -124,16 +131,24 @@ public class GreptimeDBSinkTask extends SinkTask {
                             "Record value is null and " + GreptimeDBSinkConfig.BEHAVIOR_ON_NULL_VALUES + " is fail");
                 }
                 RecordConverter.Row row = this.converter.convert(record);
-                batches.computeIfAbsent(row.table, TableBatch::new).add(row, record);
+                List<TableBatch> tableBatches = batches.computeIfAbsent(row.table, t -> new ArrayList<>());
+                TableBatch last = tableBatches.isEmpty() ? null : tableBatches.get(tableBatches.size() - 1);
+                if (last == null || !last.accepts(row)) {
+                    last = new TableBatch(row.table);
+                    tableBatches.add(last);
+                }
+                last.add(row, record);
             } catch (DataException e) {
                 handleBadRecord(record, e);
             }
         }
 
         int batchSize = this.config.batchSize();
-        for (TableBatch batch : batches.values()) {
-            for (int from = 0; from < batch.size(); from += batchSize) {
-                writeRange(batch, from, Math.min(from + batchSize, batch.size()));
+        for (List<TableBatch> tableBatches : batches.values()) {
+            for (TableBatch batch : tableBatches) {
+                for (int from = 0; from < batch.size(); from += batchSize) {
+                    writeRange(batch, from, Math.min(from + batchSize, batch.size()));
+                }
             }
         }
         this.remainingRetries = this.config.maxRetries();
@@ -146,7 +161,7 @@ public class GreptimeDBSinkTask extends SinkTask {
         if (!this.tolerateBadRecords) {
             throw new DataException("Bad record (" + where + "): " + e.getMessage(), e);
         }
-        if (!this.handledBadRecords.add(where)) {
+        if (!this.handledBadRecords.add(record)) {
             return;
         }
         if (this.reporter == null) {
