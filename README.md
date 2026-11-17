@@ -3,58 +3,87 @@
 [![CI](https://github.com/GreptimeTeam/greptimedb-kafka-connect/actions/workflows/ci.yml/badge.svg)](https://github.com/GreptimeTeam/greptimedb-kafka-connect/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-A Kafka Connect sink connector that writes Kafka records to GreptimeDB over gRPC. You choose which record fields become the time index, tags, and fields. GreptimeDB creates tables and columns automatically.
+A Kafka Connect sink connector that writes Kafka records to GreptimeDB over gRPC. You choose which record fields become the time index, tags, and fields, as defined in the [GreptimeDB data model](https://docs.greptime.com/user-guide/concepts/data-model/). GreptimeDB creates tables and columns automatically.
 
 The plugin targets Java 8 and is tested with Kafka Connect 3.9 and GreptimeDB v1.3.
 
 ## Install
 
-1. Build the plugin archive:
+1. Download `greptimedb-kafka-connect-<version>.zip` from [Releases](https://github.com/GreptimeTeam/greptimedb-kafka-connect/releases), or build it from source with `mvn package -DskipTests`, which writes it to `target/`.
+2. Extract the archive into a directory listed in the worker's `plugin.path`:
 
    ```shell
-   mvn package -DskipTests
-   ```
-
-2. Extract `target/greptimedb-kafka-connect-<version>.zip` into a directory listed in the worker's `plugin.path`:
-
-   ```shell
-   unzip target/greptimedb-kafka-connect-<version>.zip -d /opt/connectors
+   unzip greptimedb-kafka-connect-<version>.zip -d /opt/connectors
    ```
 
 3. Restart the Connect worker.
 
 ## Quick start
 
-Create a connector that writes JSON records from topic `sensor` to table `kafka_sensor`:
+This walkthrough runs Kafka, a Connect worker, and GreptimeDB locally with Docker Compose. Run the commands from a clone of this repository.
 
-```shell
-curl -X PUT -H 'Content-Type: application/json' http://localhost:8083/connectors/greptimedb-sink/config -d '{
+1. Put the plugin where the Connect worker loads it, and start the services:
+
+   ```shell
+   mkdir -p e2e/.plugins
+   unzip greptimedb-kafka-connect-<version>.zip -d e2e/.plugins
+   docker compose -f e2e/docker-compose.yml up -d
+   ```
+
+   The Connect REST API listens on `localhost:18083`, and the GreptimeDB HTTP API on `localhost:14000`. Connect is ready when `curl -s localhost:18083/connector-plugins` lists `GreptimeDBSinkConnector`.
+
+2. Create a connector that writes JSON records from topic `sensor` to table `kafka_sensor`:
+
+   ```shell
+   curl -X PUT -H 'Content-Type: application/json' http://localhost:18083/connectors/greptimedb-sink/config -d '{
+     "connector.class": "io.greptime.kafka.connect.GreptimeDBSinkConnector",
+     "topics": "sensor",
+     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+     "value.converter.schemas.enable": "false",
+     "greptimedb.endpoints": "greptimedb:4001",
+     "table.name.format": "kafka_${topic}",
+     "timestamp.field": "ts",
+     "tag.fields": "device"
+   }'
+   ```
+
+3. Produce a record:
+
+   ```shell
+   echo '{"ts": 1700000000000, "device": "d1", "temperature": 21.5}' |
+     docker compose -f e2e/docker-compose.yml exec -T kafka \
+     /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:9092 --topic sensor
+   ```
+
+4. Query the table. The record is a row with time index `ts`, tag `device`, and field `temperature`:
+
+   ```shell
+   curl http://localhost:14000/v1/sql --data-urlencode 'sql=SELECT * FROM kafka_sensor'
+   ```
+
+5. Stop the services:
+
+   ```shell
+   docker compose -f e2e/docker-compose.yml down -v
+   ```
+
+## Use with Avro and Schema Registry
+
+With Avro, Protobuf, or JSON Schema, column types come from the record schema. See [Type mapping](#type-mapping). Set the converter as for any other connector; the GreptimeDB settings stay the same:
+
+```json
+{
   "connector.class": "io.greptime.kafka.connect.GreptimeDBSinkConnector",
   "topics": "sensor",
-  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-  "value.converter.schemas.enable": "false",
+  "value.converter": "io.confluent.connect.avro.AvroConverter",
+  "value.converter.schema.registry.url": "http://schema-registry:8081",
   "greptimedb.endpoints": "greptimedb:4001",
-  "table.name.format": "kafka_${topic}",
   "timestamp.field": "ts",
-  "tag.fields": "device",
-  "errors.tolerance": "all",
-  "errors.deadletterqueue.topic.name": "sensor-dlq",
-  "errors.deadletterqueue.topic.replication.factor": "1"
-}'
+  "tag.fields": "device"
+}
 ```
 
-Produce a record:
-
-```shell
-echo '{"ts": 1700000000000, "device": "d1", "temperature": 21.5}' |
-  kafka-console-producer.sh --bootstrap-server localhost:9092 --topic sensor
-```
-
-The record becomes a row with time index `ts`, tag `device`, and field `temperature`:
-
-```shell
-curl http://localhost:4000/v1/sql --data-urlencode 'sql=SELECT * FROM kafka_sensor'
-```
+The Connect worker must have the Confluent Avro converter installed.
 
 ## Configuration
 
