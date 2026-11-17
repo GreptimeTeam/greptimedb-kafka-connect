@@ -17,7 +17,8 @@
 package io.greptime.kafka.connect;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.greptime.models.DataType;
 import io.greptime.models.SemanticType;
 import io.greptime.models.Table;
@@ -25,7 +26,6 @@ import io.greptime.v1.RowData;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import org.apache.kafka.connect.errors.DataException;
 import org.junit.jupiter.api.Test;
 
 class TableBatchTest {
@@ -73,14 +73,10 @@ class TableBatchTest {
     }
 
     @Test
-    void conflictingColumnTypeRejectsOnlyThatRow() {
+    void rowWithConflictingColumnTypeIsNotAccepted() {
         TableBatch batch = new TableBatch("t");
         batch.add(row(1, A, 1L), null);
-        assertThrows(
-                DataException.class,
-                () -> batch.add(row(2, new ColumnSpec("a", SemanticType.Field, DataType.Float64), 1.5), null));
-
-        assertEquals(1, batch.size());
-        assertEquals(1, batch.toTable(0, 1).rowCount());
+        assertTrue(batch.accepts(row(2, B, "x")));
+        assertFalse(batch.accepts(row(3, new ColumnSpec("a", SemanticType.Field, DataType.Float64), 1.5)));
     }
 }

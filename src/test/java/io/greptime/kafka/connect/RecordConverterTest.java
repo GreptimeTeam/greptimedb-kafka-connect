@@ -24,7 +24,6 @@ import io.greptime.models.DataType;
 import io.greptime.models.SemanticType;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -171,9 +170,26 @@ class RecordConverterTest {
                         SemanticType.Timestamp,
                         DataType.TimestampMillisecond),
                 row.columns.get(0));
-        assertEquals(Instant.ofEpochMilli(42L), row.values.get(0));
+        assertEquals(42L, row.values.get(0));
 
         assertThrows(DataException.class, () -> c.convert(record("t", null, Collections.singletonMap("v", 1L), null)));
+    }
+
+    @Test
+    void timestampOutsidePrecisionRangeIsBadRecord() {
+        RecordConverter ns =
+                converter(GreptimeDBSinkConfig.TIMESTAMP_FIELD, "ts", GreptimeDBSinkConfig.TIMESTAMP_PRECISION, "ns");
+        long ms = 1_700_000_000_123L;
+        RecordConverter.Row row = ns.convert(record("t", null, Collections.singletonMap("ts", new Date(ms)), null));
+        assertEquals(ms * 1_000_000L, row.values.get(0));
+
+        // Year 2500 does not fit in a signed 64-bit nanosecond epoch.
+        Date year2500 = new Date(16_725_225_600_000L);
+        assertThrows(
+                DataException.class,
+                () -> ns.convert(record("t", null, Collections.singletonMap("ts", year2500), null)));
+        assertThrows(DataException.class, () -> converter(GreptimeDBSinkConfig.TIMESTAMP_PRECISION, "ns")
+                .convert(record("t", null, Collections.singletonMap("v", 1L), year2500.getTime())));
     }
 
     @Test

@@ -128,7 +128,7 @@ final class RecordConverter {
                 throw new DataException(
                         "Record has no timestamp and " + GreptimeDBSinkConfig.TIMESTAMP_FIELD + " is not set");
             }
-            return Instant.ofEpochMilli(ts);
+            return fromEpochMillis(ts);
         }
         Object ts = values.get(this.timestampField);
         if (ts == null) {
@@ -136,13 +136,37 @@ final class RecordConverter {
         }
         // java.util.Date covers the Connect Timestamp and Date logical types.
         if (ts instanceof Date) {
-            return ts;
+            return fromEpochMillis(((Date) ts).getTime());
         }
         if (ts instanceof Long || ts instanceof Integer || ts instanceof Short || ts instanceof Byte) {
             return ((Number) ts).longValue();
         }
         throw new DataException("Timestamp field '" + this.timestampField
                 + "' must be an integer epoch value or a Connect Timestamp, got " + typeName(ts));
+    }
+
+    /**
+     * Converts here rather than in the ingester, so a value outside the range of the precision (years
+     * 1677 to 2262 for nanoseconds) is a bad record instead of an exception that fails the whole batch.
+     */
+    private long fromEpochMillis(long millis) {
+        try {
+            switch (this.timestampType) {
+                case TimestampSecond:
+                    return Math.floorDiv(millis, 1000L);
+                case TimestampMillisecond:
+                    return millis;
+                case TimestampMicrosecond:
+                    return Math.multiplyExact(millis, 1000L);
+                case TimestampNanosecond:
+                    return Math.multiplyExact(millis, 1_000_000L);
+                default:
+                    throw new IllegalStateException("Unexpected time index type " + this.timestampType);
+            }
+        } catch (ArithmeticException e) {
+            throw new DataException(
+                    "Timestamp " + Instant.ofEpochMilli(millis) + " is out of range for " + this.timestampType, e);
+        }
     }
 
     private static ColumnSpec fromSchema(String name, SemanticType semanticType, Schema schema) {
